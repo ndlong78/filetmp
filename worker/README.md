@@ -11,7 +11,7 @@ Một Worker phục vụ cả trang (`../public`, Static Assets) và API (`/api/
 npm i -g wrangler        # cần wrangler >= 4.20 (run_worker_first dạng list)
 wrangler login
 cd worker
-wrangler kv namespace create NOTES      # lần đầu: copy "id" vào wrangler.toml (REPLACE_WITH_KV_NAMESPACE_ID)
+wrangler kv namespace create NOTES      # lần đầu: copy "id" vào wrangler.toml (đã điền: 5e91a661…)
 wrangler deploy                         # gắn custom domain txt.no.id.vn (zone no.id.vn phải ở Cloudflare)
 ```
 

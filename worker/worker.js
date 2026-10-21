@@ -105,6 +105,9 @@ async function handleRoom(req, env, cors, room, id) {
 
 export default {
   async fetch(req, env) {
+    // accept either binding name (wrangler.toml uses NOTES; dashboard-generated config uses KV_BINDING)
+    env = { ...env, NOTES: env.NOTES || env.KV_BINDING };
+    if (!env.NOTES) return json({ error: 'KV binding missing (NOTES or KV_BINDING)' }, 500, {});
     const cors = corsHeaders(req, env);
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
 
