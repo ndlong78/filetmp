@@ -74,7 +74,7 @@
 <body>
 <main>
   <h1>Temp Text Store</h1>
-  <p class="sub">Lưu text tạm thời (tối đa 1 giờ). Bản ghi lưu trên trình duyệt này; bấm <b>Chia sẻ</b> để lấy link mở được trên máy / trình duyệt khác — nội dung được mã hoá trên trình duyệt, khoá chỉ nằm trong link.</p>
+  <p class="sub">Lưu text tạm thời (tối đa 1 giờ). Kết nối <b>Mã đồng bộ</b> để mọi trình duyệt dùng chung danh sách, hoặc bấm <b>Chia sẻ</b> trên từng bản ghi để lấy link — nội dung được mã hoá trên trình duyệt, khoá chỉ nằm trong link.</p>
 
   <section id="shared" class="card shared" hidden>
     <div class="note-head">
@@ -89,6 +89,33 @@
       <button type="button" data-sact="download">Tải .txt</button>
       <button type="button" data-sact="save">Lưu vào máy này</button>
       <button type="button" data-sact="close">Đóng</button>
+    </div>
+  </section>
+
+  <section id="syncCard" class="card">
+    <div id="syncOff">
+      <form id="syncForm" autocomplete="off">
+        <label for="syncInput">Mã đồng bộ — nhập cùng mã trên các trình duyệt / máy để xem chung danh sách</label>
+        <div class="share-box">
+          <input type="text" id="syncInput" placeholder="Bấm Tạo mã, hoặc nhập mã đã có">
+          <button type="button" id="syncGen">Tạo mã</button>
+          <button type="submit" id="syncConnect" class="primary">Kết nối</button>
+        </div>
+      </form>
+      <p class="meta" style="margin:6px 0 0">Dữ liệu được mã hoá bằng khoá sinh từ mã này ngay trên trình duyệt; server không đọc được. Ai có mã là xem được — giữ kín như mật khẩu.</p>
+    </div>
+    <div id="syncOn" hidden>
+      <div class="note-head">
+        <span><b>☁ Đang đồng bộ</b> · mã <code id="syncCodeShown"></code></span>
+        <span class="actions" style="margin:0">
+          <button type="button" data-sync="reveal">Hiện/ẩn</button>
+          <button type="button" data-sync="copy">Copy mã</button>
+          <button type="button" data-sync="link">Copy link kết nối</button>
+          <button type="button" data-sync="refresh">Làm mới</button>
+          <button type="button" data-sync="off" class="danger">Ngắt</button>
+        </span>
+      </div>
+      <p class="meta" id="syncStatus" style="margin:6px 0 0"></p>
     </div>
   </section>
 
@@ -163,17 +190,19 @@
     const o = JSON.parse(dec.decode(await gunzip(bytes)));
     return { title: o.t || '', content: String(o.c), createdAt: o.a, expiresAt: o.e };
   }
-  async function encrypt(bytes) {
-    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt']);
+  // key omitted -> fresh one-off key, returned as base64url for the link
+  async function encrypt(bytes, key) {
+    const own = !key;
+    if (own) key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt']);
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, bytes));
     const out = new Uint8Array(12 + ct.length);
     out.set(iv);
     out.set(ct, 12);
-    return { blob: out, key: b64u(new Uint8Array(await crypto.subtle.exportKey('raw', key))) };
+    return { blob: out, key: own ? b64u(new Uint8Array(await crypto.subtle.exportKey('raw', key))) : null };
   }
-  async function decrypt(buf, keyStr) {
-    const key = await crypto.subtle.importKey('raw', unb64u(keyStr), 'AES-GCM', false, ['decrypt']);
+  async function decrypt(buf, key) {
+    if (typeof key === 'string') key = await crypto.subtle.importKey('raw', unb64u(key), 'AES-GCM', false, ['decrypt']);
     return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: buf.subarray(0, 12) }, key, buf.subarray(12)));
   }
   const pageUrl = () => location.origin + location.pathname;
@@ -204,6 +233,133 @@
       throw new Error(`Link nhúng quá dài (${fmtNum(url.length)} ký tự)` + (API ? ' — dùng Chia sẻ qua server' : ' — cần cấu hình Worker'));
     }
     return { kind: 'link', url };
+  }
+
+  // ---- sync code: same code on every browser -> same encrypted list on the server ----
+  // PBKDF2(code) -> 512 bits: [0..32) AES-GCM key (stays in browser), [32..64) room id sent to server.
+  const SYNC_KEY = 'tempTextStore.syncCode';
+  const SYNC_POLL_MS = 15000;
+  const REMOTE_DELETE_GRACE_MS = 90000; // KV index reads can lag ~60 s behind writes
+  let sync = null; // { code, key, room }
+  let syncBusy = false;
+  let syncLast = 0;
+  let syncError = '';
+
+  function newSyncCode() {
+    const A = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // Crockford base32, 20 chars = 100 bits
+    const s = Array.from(crypto.getRandomValues(new Uint8Array(20)), (x) => A[x & 31]).join('');
+    return s.match(/.{5}/g).join('-');
+  }
+  // generated codes are case/dash-insensitive; free-form passphrases are used as typed (trimmed)
+  const normCode = (c) => (/^[0-9A-Za-z-]+$/.test(c.trim()) ? c.trim().toUpperCase().replace(/-/g, '') : c.trim());
+
+  async function deriveSync(code) {
+    const base = await crypto.subtle.importKey('raw', enc.encode(normCode(code)), 'PBKDF2', false, ['deriveBits']);
+    const bits = new Uint8Array(await crypto.subtle.deriveBits(
+      { name: 'PBKDF2', hash: 'SHA-256', salt: enc.encode('filetmp-sync-v1'), iterations: 200000 }, base, 512));
+    const key = await crypto.subtle.importKey('raw', bits.slice(0, 32), 'AES-GCM', false, ['encrypt', 'decrypt']);
+    return { code, key, room: b64u(bits.slice(32)) };
+  }
+
+  const roomUrl = (id) => `${API}/api/rooms/${sync.room}${id ? '/' + encodeURIComponent(id) : ''}`;
+
+  async function pushNote(n) {
+    const ttl = Math.floor((n.expiresAt - Date.now()) / 1000);
+    if (ttl < 60) return; // server minimum; expires locally soon anyway
+    const { blob } = await encrypt(await pack(n), sync.key);
+    const res = await fetch(roomUrl(n.id), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-TTL': String(ttl), 'X-Version': String(n.createdAt) },
+      body: blob,
+    });
+    if (!res.ok) throw new Error(`Đồng bộ lỗi ${res.status}: ${(await res.text()).slice(0, 120)}`);
+    n.synced = { v: n.createdAt, at: Date.now() };
+    await store.put(n);
+  }
+  function deleteRemote(n) {
+    if (!sync || !n.synced) return Promise.resolve();
+    return fetch(roomUrl(n.id), { method: 'DELETE' }).catch(() => {});
+  }
+
+  // pull remote index, fetch new/changed notes, drop remotely-deleted ones, push local-only ones
+  async function syncNow() {
+    if (!sync || syncBusy) return;
+    syncBusy = true;
+    let changed = false;
+    try {
+      const res = await fetch(roomUrl(), { cache: 'no-store' });
+      if (!res.ok) throw new Error(`Đồng bộ lỗi ${res.status}`);
+      const { notes: remote } = await res.json();
+      const now = Date.now();
+      const remoteIds = new Set(remote.map((e) => e.id));
+      for (const e of remote) {
+        const local = cache.find((x) => x.id === e.id);
+        if (local && local.createdAt >= e.v) continue;
+        const r = await fetch(roomUrl(e.id), { cache: 'no-store' });
+        if (!r.ok) continue; // index ahead of blob, or just expired
+        let n;
+        try { n = await unpack(await decrypt(new Uint8Array(await r.arrayBuffer()), sync.key)); }
+        catch { continue; } // not ours / corrupted
+        Object.assign(n, { id: e.id, bytes: new Blob([n.content]).size, synced: { v: e.v, at: now } });
+        await store.put(n);
+        changed = true;
+      }
+      for (const n of cache) {
+        if (n.expiresAt <= now) continue;
+        if (n.synced && !remoteIds.has(n.id)) {
+          if (now - n.synced.at > REMOTE_DELETE_GRACE_MS) { await store.del([n.id]); changed = true; }
+        } else if (!n.synced || n.synced.v < n.createdAt) {
+          await pushNote(n);
+          changed = true;
+        }
+      }
+      syncLast = Date.now();
+      syncError = '';
+    } catch (err) {
+      syncError = err.message || String(err);
+    } finally {
+      syncBusy = false;
+    }
+    if (changed) { notify(); await reload(); } else renderSync();
+  }
+
+  function renderSync() {
+    const on = !!sync;
+    $('syncOff').hidden = on;
+    $('syncOn').hidden = !on;
+    if (!API) {
+      $('syncCard').hidden = true;
+      return;
+    }
+    if (!on) return;
+    $('syncCodeShown').textContent = $('syncCodeShown').dataset.reveal ? sync.code : '•••••-•••••-•••••-•••••';
+    $('syncStatus').textContent = syncError ? `⚠ ${syncError}`
+      : syncLast ? `Đã đồng bộ lúc ${fmtTime(syncLast)} · tự làm mới mỗi ${SYNC_POLL_MS / 1000}s (có thể trễ tới ~1 phút)`
+      : 'Đang đồng bộ…';
+  }
+
+  async function connectSync(code) {
+    code = code.trim();
+    if (normCode(code).length < 8) return toast('Mã đồng bộ tối thiểu 8 ký tự');
+    $('syncConnect').disabled = true;
+    try {
+      sync = await deriveSync(code);
+      try { localStorage.setItem(SYNC_KEY, code); } catch { /* per-tab only */ }
+    } finally {
+      $('syncConnect').disabled = false;
+    }
+    syncLast = 0;
+    renderSync();
+    render();
+    await syncNow();
+  }
+  function disconnectSync() {
+    sync = null;
+    try { localStorage.removeItem(SYNC_KEY); } catch { /* ignore */ }
+    // keep local copies, but forget they were synced so reconnecting re-uploads them
+    cache.forEach((n) => { if (n.synced) { delete n.synced; store.put(n); } });
+    renderSync();
+    render();
   }
 
   // ---- shared view (#s=id.key | #d=payload) ----
@@ -404,7 +560,8 @@
       const meta = document.createElement('div');
       meta.className = 'meta';
       meta.textContent = `Tạo lúc ${fmtTime(n.createdAt)} · hết hạn ${fmtTime(n.expiresAt)} · ` +
-        `${fmtNum(n.content.length)} ký tự · ${fmtBytes(n.bytes ?? n.content.length)}`;
+        `${fmtNum(n.content.length)} ký tự · ${fmtBytes(n.bytes ?? n.content.length)}` +
+        (sync ? (n.synced && n.synced.v >= n.createdAt ? ' · ☁ đã đồng bộ' : ' · ⏳ chờ đồng bộ') : '');
 
       const pre = document.createElement('pre');
       pre.textContent = preview(n.content);
@@ -526,6 +683,7 @@
     $('form').reset();
     notify();
     await reload();
+    if (sync) pushNote(note).then(() => { notify(); render(); }, (err) => { syncError = err.message; renderSync(); });
     toast(existing ? (existing.share ? 'Đã cập nhật — link cũ đã huỷ, bấm Chia sẻ lại' : 'Đã cập nhật')
       : `Đã lưu ${fmtBytes(note.bytes)}, hết hạn sau ${minutes} phút`);
   });
@@ -574,6 +732,7 @@
         break;
       case 'del':
         unshareRemote(n);
+        deleteRemote(n);
         await store.del([id]);
         notify();
         await reload();
@@ -583,8 +742,10 @@
   });
 
   $('clearAll').addEventListener('click', async () => {
-    if (!confirm('Xoá toàn bộ bản ghi (kèm link server đã chia sẻ)?')) return;
+    if (!confirm(sync ? 'Xoá toàn bộ bản ghi trên MỌI trình duyệt đang dùng mã đồng bộ này?'
+      : 'Xoá toàn bộ bản ghi (kèm link server đã chia sẻ)?')) return;
     cache.forEach(unshareRemote);
+    cache.forEach(deleteRemote);
     await store.clear();
     notify();
     await reload();
@@ -611,12 +772,43 @@
         try { await store.put(note); } catch (err) { return toast('Lưu thất bại: ' + (err && err.message || err)); }
         notify();
         await reload();
+        if (sync) pushNote(note).then(() => render(), (err) => { syncError = err.message; renderSync(); });
         toast('Đã lưu vào máy này (giữ nguyên giờ hết hạn)');
         break;
       }
     }
   });
-  window.addEventListener('hashchange', openShared);
+  window.addEventListener('hashchange', () => { takeSyncHash(); openShared(); });
+
+  // ---- sync card ----
+  $('syncGen').addEventListener('click', () => { $('syncInput').value = newSyncCode(); $('syncInput').type = 'text'; });
+  $('syncForm').addEventListener('submit', (e) => { e.preventDefault(); connectSync($('syncInput').value).catch((err) => toast(err.message)); });
+  $('syncOn').addEventListener('click', async (e) => {
+    const act = e.target.closest('button') && e.target.closest('button').dataset.sync;
+    if (!act || !sync) return;
+    if (act === 'reveal') {
+      const el = $('syncCodeShown');
+      if (el.dataset.reveal) delete el.dataset.reveal; else el.dataset.reveal = '1';
+      renderSync();
+    } else if (act === 'copy') {
+      await copyText(sync.code, 'Đã copy mã đồng bộ');
+    } else if (act === 'link') {
+      await copyText(`${pageUrl()}#sync=${encodeURIComponent(sync.code)}`, 'Đã copy link kết nối — mở ở trình duyệt khác');
+    } else if (act === 'refresh') {
+      await syncNow();
+      toast(syncError ? syncError : 'Đã làm mới');
+    } else if (act === 'off') {
+      if (confirm('Ngắt đồng bộ trên trình duyệt này? (bản ghi trên server và máy khác vẫn giữ)')) disconnectSync();
+    }
+  });
+  // #sync=<code>: one-tap connect from another device; strip it from the address bar right away
+  function takeSyncHash() {
+    const m = location.hash.match(/^#sync=(.+)$/);
+    if (!m) return false;
+    history.replaceState(null, '', location.pathname + location.search);
+    if (API) connectSync(decodeURIComponent(m[1])).then(() => toast('Đã kết nối mã đồng bộ'), (err) => toast(err.message));
+    return true;
+  }
 
   // ---- init ----
   (async () => {
@@ -626,8 +818,16 @@
     } catch { db = null; }
     if (db) await migrateLegacy();
     await reload();
+    renderSync();
+    if (!takeSyncHash() && API) {
+      let saved = null;
+      try { saved = localStorage.getItem(SYNC_KEY); } catch { /* ignore */ }
+      if (saved) connectSync(saved).catch(() => {});
+    }
     openShared();
     setInterval(tick, 1000);
+    setInterval(() => { if (document.visibilityState === 'visible') syncNow(); }, SYNC_POLL_MS);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncNow(); });
   })();
 })();
 </script>

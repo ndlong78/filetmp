@@ -42,6 +42,13 @@ curl -s -o /dev/null -w '%{http_code}\n' "$API/api/notes/$ID"         # -> 404
 | POST | `/api/notes` | `X-TTL` (60–3600 s), `X-Delete-Token` (32 hex) | `201 {id, expiresAt}` |
 | GET | `/api/notes/:id` | — | blob, `X-Expires-At`; `404` nếu hết hạn |
 | DELETE | `/api/notes/:id` | `X-Delete-Token` | `204` / `403` |
+| GET | `/api/rooms/:room` | — | `{notes:[{id,v,expiresAt,size}]}` (index, đọc ~60 s cache KV) |
+| PUT | `/api/rooms/:room/:id` | `X-TTL`, `X-Version` | blob mã hoá + cập nhật index |
+| GET | `/api/rooms/:room/:id` | — | blob |
+| DELETE | `/api/rooms/:room/:id` | — | `204` |
+
+`:room` = 256 bit sinh từ **Mã đồng bộ** bằng PBKDF2 trên trình duyệt (khoá AES là nửa còn lại, không gửi lên server).
+Mỗi lần lưu khi đang đồng bộ tốn 2 lần ghi KV (blob + index) → free tier ~500 lần lưu/ngày.
 
 `ALLOWED_ORIGINS` (wrangler.toml) chặn POST từ trang khác qua trình duyệt — không chặn được curl.
 Free tier KV: 1.000 lần ghi/ngày, 100.000 lần đọc/ngày, 1 GB lưu trữ.
