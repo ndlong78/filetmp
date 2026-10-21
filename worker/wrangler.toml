@@ -2,10 +2,17 @@ name = "filetmp-api"
 main = "worker.js"
 compatibility_date = "2025-01-01"
 
+# Trang tĩnh (public/) + API (/api/*) trên cùng một domain
+routes = [{ pattern = "txt.no.id.vn", custom_domain = true }]
+
+[assets]
+directory = "../public"
+run_worker_first = ["/api/*"]
+
 [[kv_namespaces]]
 binding = "NOTES"
 id = "REPLACE_WITH_KV_NAMESPACE_ID"
 
 [vars]
 # Comma-separated; "*" = any origin
-ALLOWED_ORIGINS = "https://ndlong78.github.io"
+ALLOWED_ORIGINS = "https://txt.no.id.vn"

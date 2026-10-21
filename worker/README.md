@@ -3,30 +3,26 @@
 Backend cho nút **Chia sẻ**: lưu blob đã mã hoá AES-GCM trên trình duyệt (server không có khoá),
 KV tự xoá sau tối đa 1 giờ (`expirationTtl`), tối đa 25 MB/bản ghi (sau nén gzip).
 
-## Deploy (một lần)
+## Deploy
+
+Một Worker phục vụ cả trang (`../public`, Static Assets) và API (`/api/*`) trên `txt.no.id.vn`.
 
 ```bash
-npm i -g wrangler
+npm i -g wrangler        # cần wrangler >= 4.20 (run_worker_first dạng list)
 wrangler login
 cd worker
-wrangler kv namespace create NOTES      # copy "id" vào wrangler.toml (REPLACE_WITH_KV_NAMESPACE_ID)
-wrangler deploy                         # in ra URL: https://filetmp-api.<account>.workers.dev
+wrangler kv namespace create NOTES      # lần đầu: copy "id" vào wrangler.toml (REPLACE_WITH_KV_NAMESPACE_ID)
+wrangler deploy                         # gắn custom domain txt.no.id.vn (zone no.id.vn phải ở Cloudflare)
 ```
 
-Sau đó sửa `config.js` ở thư mục gốc repo:
-
-```js
-window.TEMP_TEXT_API = 'https://filetmp-api.<account>.workers.dev';
-```
-
-commit + push `main` → GitHub Pages hiện nút **Chia sẻ**.
+Đổi domain: sửa `routes`, `ALLOWED_ORIGINS` (wrangler.toml) và `public/config.js` cho khớp.
 
 ## Kiểm tra
 
 ```bash
-API=https://filetmp-api.<account>.workers.dev
+API=https://txt.no.id.vn
 TOKEN=$(openssl rand -hex 16)
-ID=$(printf 'test' | curl -s -X POST "$API/api/notes" -H "Origin: https://ndlong78.github.io" \
+ID=$(printf 'test' | curl -s -X POST "$API/api/notes" -H "Origin: https://txt.no.id.vn" \
      -H "X-TTL: 120" -H "X-Delete-Token: $TOKEN" --data-binary @- | jq -r .id)
 curl -s "$API/api/notes/$ID"                                         # -> test
 curl -s -o /dev/null -w '%{http_code}\n' -X DELETE "$API/api/notes/$ID" -H "X-Delete-Token: $TOKEN"   # -> 204
@@ -35,7 +31,8 @@ curl -s -o /dev/null -w '%{http_code}\n' "$API/api/notes/$ID"         # -> 404
 
 ## Rollback
 
-- Tắt chia sẻ server: đặt lại `window.TEMP_TEXT_API = ''` (Link nhúng vẫn chạy).
+- Về bản trước: `wrangler rollback` (hoặc Dashboard → Workers → filetmp-api → Deployments).
+- Tắt chia sẻ server: đặt `window.TEMP_TEXT_API = ''` trong `public/config.js` rồi deploy (Link nhúng vẫn chạy).
 - Gỡ hẳn: `wrangler delete` và `wrangler kv namespace delete --binding NOTES`.
 
 ## API
