@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Temp Text Store</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1b1f24; --muted: #667085;
+    --border: #d9dde3; --accent: #1f6feb; --accent-text: #ffffff;
+    --danger: #d1242f; --warn: #b54708; --ok: #1a7f37; --code: #f1f3f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0d1117; --card: #161b22; --text: #e6edf3; --muted: #8b949e;
+      --border: #30363d; --accent: #2f81f7; --accent-text: #ffffff;
+      --danger: #f85149; --warn: #d29922; --ok: #3fb950; --code: #0d1117;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px; margin-bottom: 16px;
+  }
+  label { display: block; font-weight: 600; margin-bottom: 6px; }
+  input[type=text], textarea, select {
+    width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--code); color: var(--text); font: inherit;
+  }
+  textarea { min-height: 180px; resize: vertical; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; margin-top: 12px; }
+  .row > .grow { flex: 1 1 200px; }
+  button {
+    border: 1px solid var(--border); background: var(--card); color: var(--text);
+    padding: 9px 14px; border-radius: 8px; font: inherit; cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .note-head { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .note-title { font-weight: 600; word-break: break-word; }
+  .ttl { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .ttl.warn { color: var(--warn); }
+  .bar { height: 4px; background: var(--border); border-radius: 2px; margin: 8px 0; overflow: hidden; }
+  .bar > span { display: block; height: 100%; background: var(--ok); }
+  .bar.warn > span { background: var(--warn); }
+  pre {
+    margin: 0; padding: 10px; background: var(--code); border: 1px solid var(--border);
+    border-radius: 8px; white-space: pre-wrap; word-break: break-word;
+    max-height: 260px; overflow: auto; font-size: 13px;
+  }
+  .actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .empty { color: var(--muted); text-align: center; padding: 24px; }
+  .toast {
+    position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+    background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 8px;
+    opacity: 0; transition: opacity .2s; pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Temp Text Store</h1>
+  <p class="sub">Lưu text tạm thời trên trình duyệt này. Mỗi bản ghi tự xoá khi hết hạn (mặc định 1 giờ).</p>
+
+  <form id="form" class="card" autocomplete="off">
+    <label for="title">Tiêu đề (tuỳ chọn)</label>
+    <input type="text" id="title" maxlength="120" placeholder="vd: config backup R1-HNI">
+
+    <div style="margin-top:12px">
+      <label for="content">Nội dung</label>
+      <textarea id="content" required placeholder="Dán text / config / log vào đây..."></textarea>
+    </div>
+
+    <div class="row">
+      <div class="grow">
+        <label for="ttl">Thời gian lưu</label>
+        <select id="ttl">
+          <option value="5">5 phút</option>
+          <option value="15">15 phút</option>
+          <option value="30">30 phút</option>
+          <option value="60" selected>1 giờ</option>
+        </select>
+      </div>
+      <button type="submit" class="primary">Lưu</button>
+      <button type="reset">Xoá form</button>
+    </div>
+    <p class="meta" id="count" style="margin:8px 0 0">0 ký tự</p>
+  </form>
+
+  <div class="note-head" style="margin-bottom:8px">
+    <strong id="listTitle">Bản ghi đang lưu</strong>
+    <button type="button" class="danger" id="clearAll">Xoá tất cả</button>
+  </div>
+  <div id="list"></div>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  const KEY = 'tempTextStore.v1';
+  const MAX_TTL_MIN = 60;
+  const $ = (id) => document.getElementById(id);
+
+  // ---- storage (wrapped: localStorage may throw in private mode) ----
+  let memFallback = [];
+  function load() {
+    try {
+      const raw = localStorage.getItem(KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch { return memFallback; }
+  }
+  function save(items) {
+    memFallback = items;
+    try { localStorage.setItem(KEY, JSON.stringify(items)); return true; }
+    catch { return false; }
+  }
+  function purge() {
+    const now = Date.now();
+    const items = load();
+    const alive = items.filter((n) => n.expiresAt > now);
+    if (alive.length !== items.length) save(alive);
+    return alive;
+  }
+
+  // ---- UI helpers ----
+  function toast(msg) {
+    const t = $('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toast._h);
+    toast._h = setTimeout(() => t.classList.remove('show'), 1600);
+  }
+  function fmtLeft(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    const m = Math.floor(s / 60);
+    return `${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  }
+  function fmtTime(ts) {
+    return new Date(ts).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  // ---- render ----
+  function render() {
+    const items = purge().sort((a, b) => b.createdAt - a.createdAt);
+    const list = $('list');
+    $('listTitle').textContent = `Bản ghi đang lưu (${items.length})`;
+    $('clearAll').disabled = items.length === 0;
+    list.innerHTML = '';
+    if (!items.length) {
+      list.innerHTML = '<div class="card empty">Chưa có bản ghi nào.</div>';
+      return;
+    }
+    for (const n of items) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.dataset.id = n.id;
+
+      const head = document.createElement('div');
+      head.className = 'note-head';
+      const title = document.createElement('span');
+      title.className = 'note-title';
+      title.textContent = n.title || '(không tiêu đề)';
+      const ttl = document.createElement('span');
+      ttl.className = 'ttl';
+      head.append(title, ttl);
+
+      const bar = document.createElement('div');
+      bar.className = 'bar';
+      bar.innerHTML = '<span></span>';
+
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = `Tạo lúc ${fmtTime(n.createdAt)} · hết hạn ${fmtTime(n.expiresAt)} · ${n.content.length} ký tự`;
+
+      const pre = document.createElement('pre');
+      pre.textContent = n.content;
+
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      actions.innerHTML =
+        '<button type="button" data-act="copy">Copy</button>' +
+        '<button type="button" data-act="edit">Sửa</button>' +
+        '<button type="button" data-act="download">Tải .txt</button>' +
+        '<button type="button" data-act="del" class="danger">Xoá</button>';
+
+      card.append(head, bar, meta, pre, actions);
+      list.append(card);
+    }
+    tick();
+  }
+
+  // update countdowns without full re-render
+  function tick() {
+    const now = Date.now();
+    const items = load();
+    let expired = false;
+    for (const card of $('list').querySelectorAll('.card[data-id]')) {
+      const n = items.find((x) => x.id === card.dataset.id);
+      if (!n || n.expiresAt <= now) { expired = true; continue; }
+      const left = n.expiresAt - now;
+      const pct = (left / (n.expiresAt - n.createdAt)) * 100;
+      const warn = left < 5 * 60 * 1000;
+      const ttl = card.querySelector('.ttl');
+      ttl.textContent = `còn ${fmtLeft(left)}`;
+      ttl.classList.toggle('warn', warn);
+      const bar = card.querySelector('.bar');
+      bar.classList.toggle('warn', warn);
+      bar.firstChild.style.width = pct + '%';
+    }
+    if (expired) render();
+  }
+
+  // ---- events ----
+  $('content').addEventListener('input', (e) => {
+    $('count').textContent = `${e.target.value.length} ký tự`;
+  });
+  $('form').addEventListener('reset', () => {
+    setTimeout(() => { $('count').textContent = '0 ký tự'; delete $('form').dataset.editId; }, 0);
+  });
+
+  $('form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const content = $('content').value;
+    if (!content.trim()) return;
+    const minutes = Math.min(MAX_TTL_MIN, Number($('ttl').value) || MAX_TTL_MIN);
+    const now = Date.now();
+    const items = purge();
+    const editId = $('form').dataset.editId;
+    const existing = editId && items.find((x) => x.id === editId);
+    if (existing) {
+      existing.title = $('title').value.trim();
+      existing.content = content;
+      existing.createdAt = now;
+      existing.expiresAt = now + minutes * 60000;
+    } else {
+      items.push({
+        id: (crypto.randomUUID && crypto.randomUUID()) || String(now) + Math.random(),
+        title: $('title').value.trim(),
+        content,
+        createdAt: now,
+        expiresAt: now + minutes * 60000,
+      });
+    }
+    const ok = save(items);
+    $('form').reset();
+    render();
+    toast(ok ? (existing ? 'Đã cập nhật' : `Đã lưu, hết hạn sau ${minutes} phút`)
+             : 'Không ghi được localStorage — chỉ giữ trong tab này');
+  });
+
+  $('list').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const id = btn.closest('.card').dataset.id;
+    const items = purge();
+    const n = items.find((x) => x.id === id);
+    if (!n) return render();
+    switch (btn.dataset.act) {
+      case 'copy':
+        try { await navigator.clipboard.writeText(n.content); toast('Đã copy'); }
+        catch { toast('Trình duyệt chặn clipboard'); }
+        break;
+      case 'edit':
+        $('title').value = n.title;
+        $('content').value = n.content;
+        $('count').textContent = `${n.content.length} ký tự`;
+        $('form').dataset.editId = n.id;
+        $('content').focus();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        toast('Đang sửa — Lưu sẽ reset thời gian hết hạn');
+        break;
+      case 'download': {
+        const blob = new Blob([n.content], { type: 'text/plain;charset=utf-8' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = (n.title || 'temp-text').replace(/[^\w.-]+/g, '_') + '.txt';
+        a.click();
+        URL.revokeObjectURL(a.href);
+        break;
+      }
+      case 'del':
+        save(items.filter((x) => x.id !== id));
+        render();
+        toast('Đã xoá');
+        break;
+    }
+  });
+
+  $('clearAll').addEventListener('click', () => {
+    if (!confirm('Xoá toàn bộ bản ghi?')) return;
+    save([]);
+    render();
+  });
+
+  // sync between tabs
+  window.addEventListener('storage', (e) => { if (e.key === KEY) render(); });
+
+  render();
+  setInterval(tick, 1000);
+})();
+</script>
+</body>
+</html>
