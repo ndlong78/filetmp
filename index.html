@@ -34,6 +34,7 @@
     width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: 8px;
     background: var(--code); color: var(--text); font: inherit;
   }
+  textarea.drag { outline: 2px dashed var(--accent); }
   textarea { min-height: 180px; resize: vertical; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
   .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; margin-top: 12px; }
   .row > .grow { flex: 1 1 200px; }
@@ -70,7 +71,7 @@
 <body>
 <main>
   <h1>Temp Text Store</h1>
-  <p class="sub">Lưu text tạm thời trên trình duyệt này. Mỗi bản ghi tự xoá khi hết hạn (mặc định 1 giờ).</p>
+  <p class="sub">Lưu text tạm thời trên trình duyệt này (IndexedDB). Mỗi bản ghi tự xoá khi hết hạn (mặc định 1 giờ). Không giới hạn ký tự — chỉ phụ thuộc dung lượng trình duyệt cấp.</p>
 
   <form id="form" class="card" autocomplete="off">
     <label for="title">Tiêu đề (tuỳ chọn)</label>
@@ -93,8 +94,11 @@
       </div>
       <button type="submit" class="primary">Lưu</button>
       <button type="reset">Xoá form</button>
+      <button type="button" id="openFile">Mở file…</button>
+      <input type="file" id="file" hidden>
     </div>
     <p class="meta" id="count" style="margin:8px 0 0">0 ký tự</p>
+    <p class="meta" id="quota" style="margin:2px 0 0"></p>
   </form>
 
   <div class="note-head" style="margin-bottom:8px">
@@ -107,29 +111,69 @@
 
 <script>
 (() => {
-  const KEY = 'tempTextStore.v1';
+  const DB_NAME = 'tempTextStore';
+  const STORE = 'notes';
+  const LEGACY_KEY = 'tempTextStore.v1'; // v1 used localStorage (~5 MB cap)
   const MAX_TTL_MIN = 60;
+  const PREVIEW_CHARS = 20000; // render cap; full text via Copy / Tải .txt
   const $ = (id) => document.getElementById(id);
 
-  // ---- storage (wrapped: localStorage may throw in private mode) ----
-  let memFallback = [];
-  function load() {
+  // ---- storage: IndexedDB (quota = % of disk), memory fallback ----
+  let db = null;
+  let mem = [];
+  let cache = [];
+
+  function openDb() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(STORE, { keyPath: 'id' });
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  function tx(mode, fn) {
+    return new Promise((resolve, reject) => {
+      const t = db.transaction(STORE, mode);
+      const req = fn(t.objectStore(STORE));
+      t.oncomplete = () => resolve(req && req.result);
+      t.onerror = t.onabort = () => reject(t.error);
+    });
+  }
+  const store = {
+    all: () => db ? tx('readonly', (s) => s.getAll()) : Promise.resolve(mem.slice()),
+    put: (n) => db ? tx('readwrite', (s) => s.put(n))
+      : Promise.resolve(void (mem = mem.filter((x) => x.id !== n.id).concat(n))),
+    del: (ids) => db ? tx('readwrite', (s) => { ids.forEach((id) => s.delete(id)); })
+      : Promise.resolve(void (mem = mem.filter((x) => !ids.includes(x.id)))),
+    clear: () => db ? tx('readwrite', (s) => s.clear()) : Promise.resolve(void (mem = [])),
+  };
+
+  async function migrateLegacy() {
+    let raw = null;
+    try { raw = localStorage.getItem(LEGACY_KEY); } catch { return; }
+    if (!raw) return;
     try {
-      const raw = localStorage.getItem(KEY);
-      return raw ? JSON.parse(raw) : [];
-    } catch { return memFallback; }
+      const now = Date.now();
+      for (const n of JSON.parse(raw)) if (n.expiresAt > now) await store.put(n);
+      localStorage.removeItem(LEGACY_KEY);
+    } catch { /* keep legacy data if migration fails */ }
   }
-  function save(items) {
-    memFallback = items;
-    try { localStorage.setItem(KEY, JSON.stringify(items)); return true; }
-    catch { return false; }
-  }
-  function purge() {
+
+  // ---- cross-tab sync ----
+  const bc = 'BroadcastChannel' in window ? new BroadcastChannel(DB_NAME) : null;
+  const notify = () => bc && bc.postMessage('changed');
+  if (bc) bc.onmessage = () => reload();
+
+  async function reload() {
+    cache = await store.all();
     const now = Date.now();
-    const items = load();
-    const alive = items.filter((n) => n.expiresAt > now);
-    if (alive.length !== items.length) save(alive);
-    return alive;
+    const expired = cache.filter((n) => n.expiresAt <= now).map((n) => n.id);
+    if (expired.length) {
+      await store.del(expired);
+      cache = cache.filter((n) => n.expiresAt > now);
+    }
+    render();
+    showQuota();
   }
 
   // ---- UI helpers ----
@@ -138,7 +182,7 @@
     t.textContent = msg;
     t.classList.add('show');
     clearTimeout(toast._h);
-    toast._h = setTimeout(() => t.classList.remove('show'), 1600);
+    toast._h = setTimeout(() => t.classList.remove('show'), 2200);
   }
   function fmtLeft(ms) {
     const s = Math.max(0, Math.floor(ms / 1000));
@@ -148,10 +192,29 @@
   function fmtTime(ts) {
     return new Date(ts).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
+  function fmtBytes(b) {
+    const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0;
+    while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+    return `${b.toFixed(i ? 1 : 0)} ${u[i]}`;
+  }
+  const fmtNum = (n) => n.toLocaleString('vi-VN');
+
+  async function showQuota() {
+    if (!db) {
+      $('quota').textContent = 'IndexedDB không khả dụng — dữ liệu chỉ giữ trong tab này.';
+      return;
+    }
+    if (!navigator.storage || !navigator.storage.estimate) return;
+    try {
+      const { usage, quota } = await navigator.storage.estimate();
+      $('quota').textContent = `Dung lượng trình duyệt cấp: ~${fmtBytes(quota)} · đã dùng ${fmtBytes(usage)}`;
+    } catch { /* ignore */ }
+  }
 
   // ---- render ----
   function render() {
-    const items = purge().sort((a, b) => b.createdAt - a.createdAt);
+    const items = cache.slice().sort((a, b) => b.createdAt - a.createdAt);
     const list = $('list');
     $('listTitle').textContent = `Bản ghi đang lưu (${items.length})`;
     $('clearAll').disabled = items.length === 0;
@@ -180,10 +243,14 @@
 
       const meta = document.createElement('div');
       meta.className = 'meta';
-      meta.textContent = `Tạo lúc ${fmtTime(n.createdAt)} · hết hạn ${fmtTime(n.expiresAt)} · ${n.content.length} ký tự`;
+      meta.textContent = `Tạo lúc ${fmtTime(n.createdAt)} · hết hạn ${fmtTime(n.expiresAt)} · ` +
+        `${fmtNum(n.content.length)} ký tự · ${fmtBytes(n.bytes ?? n.content.length)}`;
 
       const pre = document.createElement('pre');
-      pre.textContent = n.content;
+      pre.textContent = n.content.length > PREVIEW_CHARS
+        ? n.content.slice(0, PREVIEW_CHARS) +
+          `\n\n… (chỉ hiển thị ${fmtNum(PREVIEW_CHARS)} ký tự đầu — dùng Copy / Tải .txt để lấy đầy đủ)`
+        : n.content;
 
       const actions = document.createElement('div');
       actions.className = 'actions';
@@ -199,14 +266,21 @@
     tick();
   }
 
-  // update countdowns without full re-render
-  function tick() {
+  // update countdowns from cache without full re-render
+  async function tick() {
     const now = Date.now();
-    const items = load();
-    let expired = false;
+    const expired = cache.filter((n) => n.expiresAt <= now).map((n) => n.id);
+    if (expired.length) {
+      cache = cache.filter((n) => n.expiresAt > now);
+      await store.del(expired).catch(() => {});
+      notify();
+      render();
+      showQuota();
+      return;
+    }
     for (const card of $('list').querySelectorAll('.card[data-id]')) {
-      const n = items.find((x) => x.id === card.dataset.id);
-      if (!n || n.expiresAt <= now) { expired = true; continue; }
+      const n = cache.find((x) => x.id === card.dataset.id);
+      if (!n) continue;
       const left = n.expiresAt - now;
       const pct = (left / (n.expiresAt - n.createdAt)) * 100;
       const warn = left < 5 * 60 * 1000;
@@ -217,54 +291,74 @@
       bar.classList.toggle('warn', warn);
       bar.firstChild.style.width = pct + '%';
     }
-    if (expired) render();
   }
 
-  // ---- events ----
-  $('content').addEventListener('input', (e) => {
-    $('count').textContent = `${e.target.value.length} ký tự`;
-  });
+  // ---- form ----
+  function updateCount() {
+    $('count').textContent = `${fmtNum($('content').value.length)} ký tự`;
+  }
+  $('content').addEventListener('input', updateCount);
   $('form').addEventListener('reset', () => {
-    setTimeout(() => { $('count').textContent = '0 ký tự'; delete $('form').dataset.editId; }, 0);
+    setTimeout(() => { updateCount(); delete $('form').dataset.editId; }, 0);
   });
 
-  $('form').addEventListener('submit', (e) => {
+  async function loadFile(file) {
+    if (!file) return;
+    try {
+      $('content').value = await file.text();
+      if (!$('title').value) $('title').value = file.name;
+      updateCount();
+      toast(`Đã nạp ${file.name} (${fmtBytes(file.size)})`);
+    } catch { toast('Không đọc được file'); }
+  }
+  $('openFile').addEventListener('click', () => $('file').click());
+  $('file').addEventListener('change', (e) => { loadFile(e.target.files[0]); e.target.value = ''; });
+  const ta = $('content');
+  ta.addEventListener('dragover', (e) => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); ta.classList.add('drag'); } });
+  ta.addEventListener('dragleave', () => ta.classList.remove('drag'));
+  ta.addEventListener('drop', (e) => {
+    ta.classList.remove('drag');
+    if (e.dataTransfer.files.length) { e.preventDefault(); loadFile(e.dataTransfer.files[0]); }
+  });
+
+  $('form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const content = $('content').value;
     if (!content.trim()) return;
     const minutes = Math.min(MAX_TTL_MIN, Number($('ttl').value) || MAX_TTL_MIN);
     const now = Date.now();
-    const items = purge();
     const editId = $('form').dataset.editId;
-    const existing = editId && items.find((x) => x.id === editId);
-    if (existing) {
-      existing.title = $('title').value.trim();
-      existing.content = content;
-      existing.createdAt = now;
-      existing.expiresAt = now + minutes * 60000;
-    } else {
-      items.push({
-        id: (crypto.randomUUID && crypto.randomUUID()) || String(now) + Math.random(),
-        title: $('title').value.trim(),
-        content,
-        createdAt: now,
-        expiresAt: now + minutes * 60000,
-      });
+    const existing = editId && cache.find((x) => x.id === editId);
+    const note = {
+      id: existing ? existing.id
+        : (crypto.randomUUID && crypto.randomUUID()) || String(now) + Math.random(),
+      title: $('title').value.trim(),
+      content,
+      bytes: new Blob([content]).size,
+      createdAt: now,
+      expiresAt: now + minutes * 60000,
+    };
+    try {
+      await store.put(note);
+    } catch (err) {
+      toast(err && err.name === 'QuotaExceededError'
+        ? 'Vượt dung lượng trình duyệt cho phép — xoá bớt bản ghi cũ'
+        : 'Lưu thất bại: ' + (err && err.message || err));
+      return;
     }
-    const ok = save(items);
     $('form').reset();
-    render();
-    toast(ok ? (existing ? 'Đã cập nhật' : `Đã lưu, hết hạn sau ${minutes} phút`)
-             : 'Không ghi được localStorage — chỉ giữ trong tab này');
+    notify();
+    await reload();
+    toast(existing ? 'Đã cập nhật' : `Đã lưu ${fmtBytes(note.bytes)}, hết hạn sau ${minutes} phút`);
   });
 
+  // ---- list actions ----
   $('list').addEventListener('click', async (e) => {
     const btn = e.target.closest('button[data-act]');
     if (!btn) return;
     const id = btn.closest('.card').dataset.id;
-    const items = purge();
-    const n = items.find((x) => x.id === id);
-    if (!n) return render();
+    const n = cache.find((x) => x.id === id);
+    if (!n || n.expiresAt <= Date.now()) return tick();
     switch (btn.dataset.act) {
       case 'copy':
         try { await navigator.clipboard.writeText(n.content); toast('Đã copy'); }
@@ -273,7 +367,7 @@
       case 'edit':
         $('title').value = n.title;
         $('content').value = n.content;
-        $('count').textContent = `${n.content.length} ký tự`;
+        updateCount();
         $('form').dataset.editId = n.id;
         $('content').focus();
         window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -283,30 +377,37 @@
         const blob = new Blob([n.content], { type: 'text/plain;charset=utf-8' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
-        a.download = (n.title || 'temp-text').replace(/[^\w.-]+/g, '_') + '.txt';
+        a.download = (n.title || 'temp-text').replace(/[^\w.-]+/g, '_').replace(/(\.txt)?$/i, '.txt');
         a.click();
-        URL.revokeObjectURL(a.href);
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
         break;
       }
       case 'del':
-        save(items.filter((x) => x.id !== id));
-        render();
+        await store.del([id]);
+        notify();
+        await reload();
         toast('Đã xoá');
         break;
     }
   });
 
-  $('clearAll').addEventListener('click', () => {
+  $('clearAll').addEventListener('click', async () => {
     if (!confirm('Xoá toàn bộ bản ghi?')) return;
-    save([]);
-    render();
+    await store.clear();
+    notify();
+    await reload();
   });
 
-  // sync between tabs
-  window.addEventListener('storage', (e) => { if (e.key === KEY) render(); });
-
-  render();
-  setInterval(tick, 1000);
+  // ---- init ----
+  (async () => {
+    try {
+      if (!('indexedDB' in window)) throw new Error('no indexedDB');
+      db = await openDb();
+    } catch { db = null; }
+    if (db) await migrateLegacy();
+    await reload();
+    setInterval(tick, 1000);
+  })();
 })();
 </script>
 </body>
