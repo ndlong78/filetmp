@@ -59,6 +59,9 @@
     max-height: 260px; overflow: auto; font-size: 13px;
   }
   .actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .shared { border-color: var(--accent); }
+  .share-box { display: flex; gap: 8px; margin-top: 8px; }
+  .share-box input { flex: 1; min-width: 0; font-size: 12px; padding: 7px; }
   .empty { color: var(--muted); text-align: center; padding: 24px; }
   .toast {
     position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
@@ -71,7 +74,23 @@
 <body>
 <main>
   <h1>Temp Text Store</h1>
-  <p class="sub">Lưu text tạm thời trên trình duyệt này (IndexedDB). Mỗi bản ghi tự xoá khi hết hạn (mặc định 1 giờ). Không giới hạn ký tự — chỉ phụ thuộc dung lượng trình duyệt cấp.</p>
+  <p class="sub">Lưu text tạm thời (tối đa 1 giờ). Bản ghi lưu trên trình duyệt này; bấm <b>Chia sẻ</b> để lấy link mở được trên máy / trình duyệt khác — nội dung được mã hoá trên trình duyệt, khoá chỉ nằm trong link.</p>
+
+  <section id="shared" class="card shared" hidden>
+    <div class="note-head">
+      <span class="note-title" id="sharedTitle"></span>
+      <span class="ttl" id="sharedTtl"></span>
+    </div>
+    <div class="bar" id="sharedBar"><span></span></div>
+    <div class="meta" id="sharedMeta"></div>
+    <pre id="sharedPre"></pre>
+    <div class="actions" id="sharedActions">
+      <button type="button" data-sact="copy">Copy</button>
+      <button type="button" data-sact="download">Tải .txt</button>
+      <button type="button" data-sact="save">Lưu vào máy này</button>
+      <button type="button" data-sact="close">Đóng</button>
+    </div>
+  </section>
 
   <form id="form" class="card" autocomplete="off">
     <label for="title">Tiêu đề (tuỳ chọn)</label>
@@ -108,6 +127,7 @@
   <div id="list"></div>
 </main>
 <div class="toast" id="toast"></div>
+<script src="config.js"></script>
 
 <script>
 (() => {
@@ -116,7 +136,147 @@
   const LEGACY_KEY = 'tempTextStore.v1'; // v1 used localStorage (~5 MB cap)
   const MAX_TTL_MIN = 60;
   const PREVIEW_CHARS = 20000; // render cap; full text via Copy / Tải .txt
+  const MAX_LINK_CHARS = 2000000; // Chrome URL cap ~2 MB
+  const API = String(window.TEMP_TEXT_API || '').replace(/\/+$/, '');
   const $ = (id) => document.getElementById(id);
+
+  // ---- share codec: gzip(JSON) -> [AES-GCM] -> base64url ----
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  const pipe = async (bytes, stream) =>
+    new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer());
+  const gzip = (b) => pipe(b, new CompressionStream('gzip'));
+  const gunzip = (b) => pipe(b, new DecompressionStream('gzip'));
+  function b64u(bytes) {
+    let s = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function unb64u(str) {
+    const bin = atob(str.replace(/-/g, '+').replace(/_/g, '/'));
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  const pack = (n) => gzip(enc.encode(JSON.stringify({ t: n.title, c: n.content, a: n.createdAt, e: n.expiresAt })));
+  async function unpack(bytes) {
+    const o = JSON.parse(dec.decode(await gunzip(bytes)));
+    return { title: o.t || '', content: String(o.c), createdAt: o.a, expiresAt: o.e };
+  }
+  async function encrypt(bytes) {
+    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt']);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, bytes));
+    const out = new Uint8Array(12 + ct.length);
+    out.set(iv);
+    out.set(ct, 12);
+    return { blob: out, key: b64u(new Uint8Array(await crypto.subtle.exportKey('raw', key))) };
+  }
+  async function decrypt(buf, keyStr) {
+    const key = await crypto.subtle.importKey('raw', unb64u(keyStr), 'AES-GCM', false, ['decrypt']);
+    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: buf.subarray(0, 12) }, key, buf.subarray(12)));
+  }
+  const pageUrl = () => location.origin + location.pathname;
+  const randHex = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)), (b) => b.toString(16).padStart(2, '0')).join('');
+
+  async function shareToServer(n) {
+    const { blob, key } = await encrypt(await pack(n));
+    const ttl = Math.ceil((n.expiresAt - Date.now()) / 1000);
+    if (ttl < 60) throw new Error('Còn dưới 1 phút — không đủ để chia sẻ');
+    const token = randHex(16);
+    const res = await fetch(`${API}/api/notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-TTL': String(ttl), 'X-Delete-Token': token },
+      body: blob,
+    });
+    if (!res.ok) throw new Error(`Server trả ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    const { id } = await res.json();
+    return { kind: 'server', id, token, url: `${pageUrl()}#s=${id}.${key}` };
+  }
+  function unshareRemote(n) {
+    if (!API || !n.share || n.share.kind !== 'server') return Promise.resolve();
+    return fetch(`${API}/api/notes/${n.share.id}`, { method: 'DELETE', headers: { 'X-Delete-Token': n.share.token } })
+      .catch(() => {}); // best-effort: KV TTL removes it anyway
+  }
+  async function embedLink(n) {
+    const url = `${pageUrl()}#d=${b64u(await pack(n))}`;
+    if (url.length > MAX_LINK_CHARS) {
+      throw new Error(`Link nhúng quá dài (${fmtNum(url.length)} ký tự)` + (API ? ' — dùng Chia sẻ qua server' : ' — cần cấu hình Worker'));
+    }
+    return { kind: 'link', url };
+  }
+
+  // ---- shared view (#s=id.key | #d=payload) ----
+  let shared = null;
+  async function openShared() {
+    const h = location.hash;
+    const m = h.match(/^#s=([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/) || h.match(/^#d=([A-Za-z0-9_-]+)$/);
+    if (!m) { shared = null; $('shared').hidden = true; return; }
+    $('shared').hidden = false;
+    $('sharedTitle').textContent = 'Đang tải nội dung chia sẻ…';
+    $('sharedPre').textContent = '';
+    $('sharedMeta').textContent = '';
+    $('sharedTtl').textContent = '';
+    try {
+      if (h.startsWith('#s=')) {
+        if (!API) throw new Error('Trang chưa cấu hình Worker (config.js) — không tải được link server');
+        const res = await fetch(`${API}/api/notes/${m[1]}`, { cache: 'no-store' });
+        if (res.status === 404) throw new Error('Không tìm thấy — đã hết hạn hoặc đã bị xoá');
+        if (!res.ok) throw new Error(`Server trả ${res.status}`);
+        const buf = new Uint8Array(await res.arrayBuffer());
+        let plain;
+        try { plain = await decrypt(buf, m[2]); } catch { throw new Error('Sai khoá hoặc link bị cắt'); }
+        shared = { ...(await unpack(plain)), source: 'server' };
+      } else {
+        shared = { ...(await unpack(unb64u(m[1]))), source: 'link' };
+      }
+    } catch (err) {
+      shared = null;
+      $('sharedTitle').textContent = err.message || 'Link không hợp lệ';
+      return;
+    }
+    $('sharedTitle').textContent = `Được chia sẻ: ${shared.title || '(không tiêu đề)'}`;
+    $('sharedMeta').textContent = `${shared.source === 'server' ? 'Qua server (mã hoá)' : 'Link nhúng'} · ` +
+      `hết hạn ${fmtTime(shared.expiresAt)} · ${fmtNum(shared.content.length)} ký tự`;
+    $('sharedPre').textContent = preview(shared.content);
+    tickShared();
+  }
+  function tickShared() {
+    if (!shared) return;
+    const left = shared.expiresAt - Date.now();
+    if (left <= 0) {
+      shared = null;
+      $('sharedTitle').textContent = 'Nội dung chia sẻ đã hết hạn';
+      $('sharedPre').textContent = '';
+      $('sharedMeta').textContent = '';
+      $('sharedTtl').textContent = '';
+      $('sharedBar').firstChild.style.width = '0';
+      return;
+    }
+    const warn = left < 5 * 60 * 1000;
+    $('sharedTtl').textContent = `còn ${fmtLeft(left)}`;
+    $('sharedTtl').classList.toggle('warn', warn);
+    $('sharedBar').classList.toggle('warn', warn);
+    $('sharedBar').firstChild.style.width = (left / (shared.expiresAt - shared.createdAt)) * 100 + '%';
+  }
+  function preview(text) {
+    return text.length > PREVIEW_CHARS
+      ? text.slice(0, PREVIEW_CHARS) +
+        `\n\n… (chỉ hiển thị ${fmtNum(PREVIEW_CHARS)} ký tự đầu — dùng Copy / Tải .txt để lấy đầy đủ)`
+      : text;
+  }
+  function downloadText(title, content) {
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (title || 'temp-text').replace(/[^\w.-]+/g, '_').replace(/(\.txt)?$/i, '.txt');
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+  async function copyText(text, okMsg) {
+    try { await navigator.clipboard.writeText(text); toast(okMsg); }
+    catch { toast('Trình duyệt chặn clipboard'); }
+  }
 
   // ---- storage: IndexedDB (quota = % of disk), memory fallback ----
   let db = null;
@@ -247,10 +407,7 @@
         `${fmtNum(n.content.length)} ký tự · ${fmtBytes(n.bytes ?? n.content.length)}`;
 
       const pre = document.createElement('pre');
-      pre.textContent = n.content.length > PREVIEW_CHARS
-        ? n.content.slice(0, PREVIEW_CHARS) +
-          `\n\n… (chỉ hiển thị ${fmtNum(PREVIEW_CHARS)} ký tự đầu — dùng Copy / Tải .txt để lấy đầy đủ)`
-        : n.content;
+      pre.textContent = preview(n.content);
 
       const actions = document.createElement('div');
       actions.className = 'actions';
@@ -258,9 +415,27 @@
         '<button type="button" data-act="copy">Copy</button>' +
         '<button type="button" data-act="edit">Sửa</button>' +
         '<button type="button" data-act="download">Tải .txt</button>' +
+        (API ? '<button type="button" data-act="share" class="primary">Chia sẻ</button>' : '') +
+        '<button type="button" data-act="embed">Link nhúng</button>' +
         '<button type="button" data-act="del" class="danger">Xoá</button>';
 
       card.append(head, bar, meta, pre, actions);
+      if (n.share) {
+        const box = document.createElement('div');
+        box.className = 'share-box';
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.readOnly = true;
+        input.value = n.share.url;
+        input.addEventListener('focus', () => input.select());
+        const label = document.createElement('span');
+        label.className = 'meta';
+        label.textContent = n.share.kind === 'server' ? 'Link server:' : 'Link nhúng:';
+        label.style.alignSelf = 'center';
+        box.append(label, input);
+        box.insertAdjacentHTML('beforeend', '<button type="button" data-act="copylink">Copy link</button>');
+        card.append(box);
+      }
       list.append(card);
     }
     tick();
@@ -268,6 +443,7 @@
 
   // update countdowns from cache without full re-render
   async function tick() {
+    tickShared();
     const now = Date.now();
     const expired = cache.filter((n) => n.expiresAt <= now).map((n) => n.id);
     if (expired.length) {
@@ -340,6 +516,7 @@
     };
     try {
       await store.put(note);
+      if (existing && existing.share) unshareRemote(existing); // old link would show stale text
     } catch (err) {
       toast(err && err.name === 'QuotaExceededError'
         ? 'Vượt dung lượng trình duyệt cho phép — xoá bớt bản ghi cũ'
@@ -349,7 +526,8 @@
     $('form').reset();
     notify();
     await reload();
-    toast(existing ? 'Đã cập nhật' : `Đã lưu ${fmtBytes(note.bytes)}, hết hạn sau ${minutes} phút`);
+    toast(existing ? (existing.share ? 'Đã cập nhật — link cũ đã huỷ, bấm Chia sẻ lại' : 'Đã cập nhật')
+      : `Đã lưu ${fmtBytes(note.bytes)}, hết hạn sau ${minutes} phút`);
   });
 
   // ---- list actions ----
@@ -361,9 +539,27 @@
     if (!n || n.expiresAt <= Date.now()) return tick();
     switch (btn.dataset.act) {
       case 'copy':
-        try { await navigator.clipboard.writeText(n.content); toast('Đã copy'); }
-        catch { toast('Trình duyệt chặn clipboard'); }
+        await copyText(n.content, 'Đã copy');
         break;
+      case 'copylink':
+        await copyText(n.share.url, 'Đã copy link');
+        break;
+      case 'share':
+      case 'embed': {
+        btn.disabled = true;
+        try {
+          const share = btn.dataset.act === 'share' ? await shareToServer(n) : await embedLink(n);
+          await unshareRemote(n);
+          n.share = share;
+          await store.put(n);
+          render();
+          await copyText(share.url, `Đã tạo & copy link — hết hạn ${fmtTime(n.expiresAt)}`);
+        } catch (err) {
+          toast(err.message || String(err));
+          btn.disabled = false;
+        }
+        break;
+      }
       case 'edit':
         $('title').value = n.title;
         $('content').value = n.content;
@@ -373,16 +569,11 @@
         window.scrollTo({ top: 0, behavior: 'smooth' });
         toast('Đang sửa — Lưu sẽ reset thời gian hết hạn');
         break;
-      case 'download': {
-        const blob = new Blob([n.content], { type: 'text/plain;charset=utf-8' });
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = (n.title || 'temp-text').replace(/[^\w.-]+/g, '_').replace(/(\.txt)?$/i, '.txt');
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      case 'download':
+        downloadText(n.title, n.content);
         break;
-      }
       case 'del':
+        unshareRemote(n);
         await store.del([id]);
         notify();
         await reload();
@@ -392,11 +583,40 @@
   });
 
   $('clearAll').addEventListener('click', async () => {
-    if (!confirm('Xoá toàn bộ bản ghi?')) return;
+    if (!confirm('Xoá toàn bộ bản ghi (kèm link server đã chia sẻ)?')) return;
+    cache.forEach(unshareRemote);
     await store.clear();
     notify();
     await reload();
   });
+
+  $('sharedActions').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-sact]');
+    if (!btn) return;
+    if (btn.dataset.sact === 'close') {
+      history.replaceState(null, '', location.pathname + location.search);
+      return openShared();
+    }
+    if (!shared) return;
+    switch (btn.dataset.sact) {
+      case 'copy': await copyText(shared.content, 'Đã copy'); break;
+      case 'download': downloadText(shared.title, shared.content); break;
+      case 'save': {
+        const content = shared.content;
+        const note = {
+          id: (crypto.randomUUID && crypto.randomUUID()) || String(Date.now()) + Math.random(),
+          title: shared.title, content, bytes: new Blob([content]).size,
+          createdAt: shared.createdAt, expiresAt: shared.expiresAt,
+        };
+        try { await store.put(note); } catch (err) { return toast('Lưu thất bại: ' + (err && err.message || err)); }
+        notify();
+        await reload();
+        toast('Đã lưu vào máy này (giữ nguyên giờ hết hạn)');
+        break;
+      }
+    }
+  });
+  window.addEventListener('hashchange', openShared);
 
   // ---- init ----
   (async () => {
@@ -406,6 +626,7 @@
     } catch { db = null; }
     if (db) await migrateLegacy();
     await reload();
+    openShared();
     setInterval(tick, 1000);
   })();
 })();
