@@ -102,7 +102,7 @@
           <button type="submit" id="syncConnect" class="primary">Kết nối</button>
         </div>
       </form>
-      <p class="meta" style="margin:6px 0 0">Dữ liệu được mã hoá bằng khoá sinh từ mã này ngay trên trình duyệt; server không đọc được. Ai có mã là xem được — giữ kín như mật khẩu.</p>
+      <p class="meta" style="margin:6px 0 0">Dữ liệu được mã hoá bằng khoá sinh từ mã này ngay trên trình duyệt; server không đọc được. Ai có mã là xem được — giữ kín như mật khẩu. <b>Giai đoạn test: mã 6 ký tự</b>, chưa dùng cho dữ liệu nhạy cảm.</p>
     </div>
     <div id="syncOn" hidden>
       <div class="note-head">
@@ -239,6 +239,9 @@
   // PBKDF2(code) -> 512 bits: [0..32) AES-GCM key (stays in browser), [32..64) room id sent to server.
   const SYNC_KEY = 'tempTextStore.syncCode';
   const SYNC_POLL_MS = 15000;
+  // TEST PHASE: 6-char codes (30 bits) for easy typing. For production raise to 20 (100 bits).
+  const SYNC_CODE_LEN = 6;
+  const SYNC_CODE_MIN = 6;
   const REMOTE_DELETE_GRACE_MS = 90000; // KV index reads can lag ~60 s behind writes
   let sync = null; // { code, key, room }
   let syncBusy = false;
@@ -246,9 +249,9 @@
   let syncError = '';
 
   function newSyncCode() {
-    const A = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // Crockford base32, 20 chars = 100 bits
-    const s = Array.from(crypto.getRandomValues(new Uint8Array(20)), (x) => A[x & 31]).join('');
-    return s.match(/.{5}/g).join('-');
+    const A = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // Crockford base32, 5 bits/char
+    const s = Array.from(crypto.getRandomValues(new Uint8Array(SYNC_CODE_LEN)), (x) => A[x & 31]).join('');
+    return s.length > 6 ? s.match(/.{1,5}/g).join('-') : s;
   }
   // generated codes are case/dash-insensitive; free-form passphrases are used as typed (trimmed)
   const normCode = (c) => (/^[0-9A-Za-z-]+$/.test(c.trim()) ? c.trim().toUpperCase().replace(/-/g, '') : c.trim());
@@ -332,7 +335,7 @@
       return;
     }
     if (!on) return;
-    $('syncCodeShown').textContent = $('syncCodeShown').dataset.reveal ? sync.code : '•••••-•••••-•••••-•••••';
+    $('syncCodeShown').textContent = $('syncCodeShown').dataset.reveal ? sync.code : '••••••';
     $('syncStatus').textContent = syncError ? `⚠ ${syncError}`
       : syncLast ? `Đã đồng bộ lúc ${fmtTime(syncLast)} · tự làm mới mỗi ${SYNC_POLL_MS / 1000}s (có thể trễ tới ~1 phút)`
       : 'Đang đồng bộ…';
@@ -340,7 +343,7 @@
 
   async function connectSync(code) {
     code = code.trim();
-    if (normCode(code).length < 8) return toast('Mã đồng bộ tối thiểu 8 ký tự');
+    if (normCode(code).length < SYNC_CODE_MIN) return toast(`Mã đồng bộ tối thiểu ${SYNC_CODE_MIN} ký tự`);
     $('syncConnect').disabled = true;
     try {
       sync = await deriveSync(code);
