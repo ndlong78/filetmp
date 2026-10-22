@@ -36,3 +36,18 @@ enabled = true
 [vars]
 # Origin khác (ngoài chính trang) được phép gọi API, phân tách bằng dấu phẩy. Để trống = chỉ same-origin.
 ALLOWED_ORIGINS = ""
+
+# ---- Worker Previews (`wrangler preview`, chạy cho branch không phải production) ----
+# Durable Object không có script_name -> mỗi preview có namespace DO riêng, không đụng dữ liệu production.
+# Không bind KV production: link chia sẻ trả 503 trên preview, phòng đồng bộ vẫn chạy.
+[previews.vars]
+ALLOWED_ORIGINS = ""
+
+[[previews.durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+[[previews.ratelimits]]
+name = "WRITE_LIMITER"
+namespace_id = "1002"
+simple = { limit = 30, period = 60 }

@@ -232,6 +232,8 @@ async function handleRoom(req, env, room, id, sub) {
 }
 
 async function handleShare(req, env, id) {
+  // Previews run without the production KV namespace: rooms keep working, share links are off.
+  if (!env.NOTES) return json({ error: 'share links unavailable on this deployment (no KV binding)' }, 503);
   if (id !== undefined && !ID_RE.test(id)) return json({ error: 'bad id' }, 400);
 
   if (req.method === 'POST' && id === undefined) {
@@ -271,7 +273,7 @@ export default {
     env = { ...env, NOTES: env.NOTES || env.KV_BINDING };
     const cors = corsHeaders(req, env);
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-    if (!env.NOTES || !env.ROOMS) return json({ error: 'server misconfigured: NOTES (KV) / ROOMS (DO) binding missing' }, 500, cors);
+    if (!env.ROOMS) return json({ error: 'server misconfigured: ROOMS (Durable Object) binding missing' }, 500, cors);
 
     const isWrite = req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE';
     if (isWrite) {
