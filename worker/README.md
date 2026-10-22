@@ -5,17 +5,26 @@ KV tự xoá sau tối đa 1 giờ (`expirationTtl`), tối đa 25 MB/bản ghi 
 
 ## Deploy
 
-Một Worker phục vụ cả trang (`../public`, Static Assets) và API (`/api/*`) trên `txt.no.id.vn`.
+Một Worker phục vụ cả trang (`public/`, Static Assets) và API (`/api/*`, `worker/worker.js`) trên `txt.no.id.vn`.
+Config: **`wrangler.toml` ở thư mục gốc repo** (để Workers Builds/Git và `wrangler deploy` dùng chung).
 
 ```bash
 npm i -g wrangler        # cần wrangler >= 4.20 (run_worker_first dạng list)
 wrangler login
-cd worker
-wrangler kv namespace create NOTES      # lần đầu: copy "id" vào wrangler.toml (đã điền: 5e91a661…)
+# chạy ở thư mục gốc repo
+wrangler kv namespace create NOTES      # lần đầu: copy "id" vào wrangler.toml (thư mục gốc) (đã điền: 5e91a661…)
 wrangler deploy                         # gắn custom domain txt.no.id.vn (zone no.id.vn phải ở Cloudflare)
 ```
 
-Đổi domain: sửa `routes`, `ALLOWED_ORIGINS` (wrangler.toml) và `public/config.js` cho khớp.
+Đổi domain: sửa `routes`, `ALLOWED_ORIGINS` (`wrangler.toml` gốc) và `public/config.js` cho khớp.
+
+### Deploy qua Git (Workers Builds)
+
+Dashboard → Workers & Pages → Worker → Settings → Build:
+- **Root directory**: `/` (để trống) · **Deploy command**: `npx wrangler deploy`
+- Tên Worker trên Dashboard phải trùng `name` trong `wrangler.toml` (`filetmp-api`), nếu khác thì sửa `name` cho khớp.
+
+Dấu hiệu deploy thiếu worker script: `/api/rooms/...` trả **404 body rỗng** (Static Assets), còn Worker cũ trả `{"error":"not found"}`.
 
 ## Kiểm tra
 
@@ -50,5 +59,5 @@ curl -s -o /dev/null -w '%{http_code}\n' "$API/api/notes/$ID"         # -> 404
 `:room` = 256 bit sinh từ **Mã đồng bộ** bằng PBKDF2 trên trình duyệt (khoá AES là nửa còn lại, không gửi lên server).
 Mỗi lần lưu khi đang đồng bộ tốn 2 lần ghi KV (blob + index) → free tier ~500 lần lưu/ngày.
 
-`ALLOWED_ORIGINS` (wrangler.toml) chặn POST từ trang khác qua trình duyệt — không chặn được curl.
+`ALLOWED_ORIGINS` (`wrangler.toml` gốc) chặn POST từ trang khác qua trình duyệt — không chặn được curl.
 Free tier KV: 1.000 lần ghi/ngày, 100.000 lần đọc/ngày, 1 GB lưu trữ.

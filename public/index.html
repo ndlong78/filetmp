@@ -294,7 +294,8 @@
       if (!res.ok) {
         const body = (await res.text()).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
         throw new Error(`Đồng bộ lỗi ${res.status} tại ${new URL(roomUrl()).pathname.slice(0, 18)}…` +
-          (body ? ` — ${body}` : '') + (res.status === 404 ? ' (Worker chưa có /api/rooms — deploy lại worker/)' : ''));
+          (body ? ` — ${body}` : '') + (res.status === 404 ? (body ? ' (Worker cũ chưa có /api/rooms — deploy lại)'
+            : ' (deploy chỉ có static assets, thiếu worker script — xem wrangler.toml ở thư mục gốc)') : ''));
       }
       const { notes: remote } = await res.json();
       const now = Date.now();
