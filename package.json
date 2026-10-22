@@ -1,0 +1,15 @@
+{
+  "name": "filetmp",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 8787",
+    "test": "playwright test",
+    "check": "node --check public/app.js && node --check worker/worker.js && wrangler deploy --dry-run --outdir .wrangler/dry-run",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1",
+    "wrangler": "4.40.0"
+  }
+}
