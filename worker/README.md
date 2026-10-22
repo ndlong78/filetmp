@@ -25,8 +25,9 @@ npm run check                       # cú pháp + wrangler deploy --dry-run
 Quy trình: branch → PR (CI chạy `npm run check` + `npm test`) → review → merge `main` → Workers Builds deploy.
 Bật **branch protection** cho `main` (GitHub → Settings → Branches): require PR + status check `CI / test`.
 
-> Workers Builds trên branch không phải production chạy `wrangler versions upload`, lệnh này **không hỗ trợ
-> Durable Object migration** — build preview của PR thêm migration mới sẽ lỗi; build `main` (`wrangler deploy`) vẫn chạy.
+> Build branch không phải production chạy `npx wrangler preview` (Worker Previews, cần wrangler ≥ 4.1xx — đã pin
+> trong `package.json`). Nếu preview của PR có Durable Object migration mới bị lỗi, đổi lệnh preview trong
+> Dashboard → Settings → Build thành `npx wrangler versions upload` hoặc bỏ qua: build `main` (`wrangler deploy`) mới áp migration.
 
 ## Cấu hình Cloudflare (Dashboard, làm một lần)
 
