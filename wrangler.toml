@@ -1,20 +1,53 @@
 # Config ở thư mục gốc để Workers Builds (Git) và `wrangler deploy` đều tìm thấy.
-# Worker phục vụ public/ (Static Assets) + /api/* (worker/worker.js) trên txt.no.id.vn.
+# Worker "txt": phục vụ public/ (Static Assets) + /api/* (worker/worker.js) trên txt.no.id.vn.
 name = "txt"
 main = "worker/worker.js"
-compatibility_date = "2025-01-01"
+compatibility_date = "2025-09-01"
 
-# Trang tĩnh (public/) + API (/api/*) trên cùng một domain
 routes = [{ pattern = "txt.no.id.vn", custom_domain = true }]
 
 [assets]
 directory = "./public"
 run_worker_first = ["/api/*"]
 
+# Link chia sẻ 1 lần (/api/notes) — KV tự xoá theo TTL
 [[kv_namespaces]]
 binding = "NOTES"
 id = "5e91a66146f3448f8a7ea7533b503a79"
 
+# Phòng đồng bộ (/api/rooms) — Durable Object SQLite: nhất quán mạnh, WebSocket push
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+# Giới hạn ghi (POST/PUT/DELETE) theo IP
+[[ratelimits]]
+name = "WRITE_LIMITER"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }
+
+[observability]
+enabled = true
+
 [vars]
-# Comma-separated; "*" = any origin
-ALLOWED_ORIGINS = "https://txt.no.id.vn"
+# Origin khác (ngoài chính trang) được phép gọi API, phân tách bằng dấu phẩy. Để trống = chỉ same-origin.
+ALLOWED_ORIGINS = ""
+
+# ---- Worker Previews (`wrangler preview`, chạy cho branch không phải production) ----
+# Durable Object không có script_name -> mỗi preview có namespace DO riêng, không đụng dữ liệu production.
+# Không bind KV production: link chia sẻ trả 503 trên preview, phòng đồng bộ vẫn chạy.
+[previews.vars]
+ALLOWED_ORIGINS = ""
+
+[[previews.durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+[[previews.ratelimits]]
+name = "WRITE_LIMITER"
+namespace_id = "1002"
+simple = { limit = 30, period = 60 }
