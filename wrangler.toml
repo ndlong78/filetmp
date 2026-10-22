@@ -1,6 +1,6 @@
 # Config ở thư mục gốc để Workers Builds (Git) và `wrangler deploy` đều tìm thấy.
 # Worker phục vụ public/ (Static Assets) + /api/* (worker/worker.js) trên txt.no.id.vn.
-name = "filetmp-api"
+name = "txt"
 main = "worker/worker.js"
 compatibility_date = "2025-01-01"
 

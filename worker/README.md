@@ -1,4 +1,4 @@
-# filetmp-api — Cloudflare Worker + KV
+# txt (Worker) — Cloudflare Worker + KV
 
 Backend cho nút **Chia sẻ**: lưu blob đã mã hoá AES-GCM trên trình duyệt (server không có khoá),
 KV tự xoá sau tối đa 1 giờ (`expirationTtl`), tối đa 25 MB/bản ghi (sau nén gzip).
@@ -22,7 +22,7 @@ wrangler deploy                         # gắn custom domain txt.no.id.vn (zone
 
 Dashboard → Workers & Pages → Worker → Settings → Build:
 - **Root directory**: `/` (để trống) · **Deploy command**: `npx wrangler deploy`
-- Tên Worker trên Dashboard phải trùng `name` trong `wrangler.toml` (`filetmp-api`), nếu khác thì sửa `name` cho khớp.
+- Tên Worker trên Dashboard phải trùng `name` trong `wrangler.toml` (`txt`), nếu khác thì sửa `name` cho khớp.
 
 Dấu hiệu deploy thiếu worker script: `/api/rooms/...` trả **404 body rỗng** (Static Assets), còn Worker cũ trả `{"error":"not found"}`.
 
@@ -40,7 +40,7 @@ curl -s -o /dev/null -w '%{http_code}\n' "$API/api/notes/$ID"         # -> 404
 
 ## Rollback
 
-- Về bản trước: `wrangler rollback` (hoặc Dashboard → Workers → filetmp-api → Deployments).
+- Về bản trước: `wrangler rollback` (hoặc Dashboard → Workers → txt → Deployments).
 - Tắt chia sẻ server: đặt `window.TEMP_TEXT_API = ''` trong `public/config.js` rồi deploy (Link nhúng vẫn chạy).
 - Gỡ hẳn: `wrangler delete` và `wrangler kv namespace delete --binding NOTES`.
 
